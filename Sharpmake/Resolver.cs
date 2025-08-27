@@ -8,7 +8,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Extensions.Primitives;
 
 namespace Sharpmake
 {
@@ -197,6 +200,7 @@ namespace Sharpmake
         public Resolver(bool isCaseSensitive)
         {
             IsCaseSensitive = isCaseSensitive;
+            _parameters2 = new Dictionary<StringSlice, RefCountedSymbol>(isCaseSensitive ? StringSliceComparer.Ordinal : StringSliceComparer.OrdinalIgnoreCase);
         }
 
         public bool IsCaseSensitive { get; set; }
@@ -204,6 +208,7 @@ namespace Sharpmake
         public void SetParameter(string name, object obj)
         {
             name = SetParameterImpl(name, obj, false);
+            _ = SetParameterImpl2(name, obj, false);
         }
 
         private string SetParameterImpl(string name, object obj, bool scoped)
@@ -222,6 +227,27 @@ namespace Sharpmake
             else
             {
                 _parameters.Add(name, new RefCountedSymbol(obj));
+            }
+
+            return name;
+        }
+
+        private string SetParameterImpl2(string name, object obj, bool scoped)
+        {
+            //var key = new StringSlice(name);
+            var key = new StringSegment(name);
+
+            RefCountedSymbol refCountedObject;
+            if (_parameters2.TryGetValue(key, out refCountedObject))
+            {
+                if (scoped)
+                    refCountedObject.PushValue(obj);
+                else
+                    refCountedObject.Value = obj;
+            }
+            else
+            {
+                _parameters2.Add(key, new RefCountedSymbol(obj));
             }
 
             return name;
@@ -312,7 +338,7 @@ namespace Sharpmake
         }
 
         // Note: The method doesn't use regex as this was slower with regexes(mainly due to MT contention)
-        public string Resolve(string str, object fallbackValue, out bool wasChanged)
+        public virtual string Resolve(string str, object fallbackValue, out bool wasChanged)
         {
             wasChanged = false;
 
@@ -459,6 +485,155 @@ namespace Sharpmake
 
             return str;
         }
+
+        public virtual string Resolve2(string str, object fallbackValue, out bool wasChanged)
+        {
+            wasChanged = false;
+
+            // Early out
+            if (str == null)
+                return str;
+
+            StringBuilder builder = null;
+
+            // Support escape char for MemberPath
+            // [[MyString]] will convert to [MyString]
+            bool containsEscaped = false;
+
+            while (true)
+            {
+                int startMatch = 0;
+                int nbrReplacements = 0;
+                int currentSearchIndex = 0;
+                int endMatch = 0;
+                int strLength = str.Length;
+                while (currentSearchIndex < strLength)
+                {
+                    // Find match range.
+                    startMatch = -1;
+                    int matchTypeIndex;
+                    for (matchTypeIndex = 0; matchTypeIndex < _pathBeginStrings.Length; ++matchTypeIndex)
+                    {
+                        // Note that specifying StringComparison.Ordinal saves ~30% of the time passed in IndexOf.
+                        startMatch = str.IndexOf(_pathBeginStrings[matchTypeIndex], currentSearchIndex, StringComparison.Ordinal);
+                        if (startMatch != -1)
+                            break;
+                    }
+
+                    if (startMatch == -1)
+                        break;
+
+                    endMatch = str.IndexOfAny(_pathEndCharacters, startMatch + 1);
+                    if (endMatch == -1)
+                        break;
+
+                    if (builder == null)
+                        builder = new StringBuilder(str.Length + 128);
+
+                    // Append what's before the match
+                    if (startMatch - currentSearchIndex > 0)
+                        builder.Append(str, currentSearchIndex, startMatch - currentSearchIndex);
+
+                    bool isValidMember = true;
+                    int startMatchLength = _pathBeginStrings[matchTypeIndex].Length;
+                    int memberStartIndex = startMatch + startMatchLength;
+                    for (int i = memberStartIndex; i < endMatch; ++i)
+                    {
+                        char currentChar = str[i];
+                        if (currentChar is not (>= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.' or '_' or ':'))
+                        {
+                            isValidMember = false;
+                            break;
+                        }
+                    }
+
+                    // A string is escaped if the _PathBeginStrings/_PathEndStrings char is doubled (ie [[ ]])
+                    // Also make sure that matchTypeIndex is a char, not a string
+                    bool isEscaped = _pathBeginStrings[matchTypeIndex].Length == 1 &&
+                                     memberStartIndex > 1 && endMatch < str.Length - 1 &&
+                                     str[memberStartIndex - 2] == str[memberStartIndex - 1] &&
+                                     str[endMatch] == str[endMatch + 1];
+
+                    containsEscaped |= isEscaped;
+
+                    if (isValidMember && !isEscaped)
+                    {
+                        bool throwIfNotFound = fallbackValue == null;
+
+                        ReadOnlySpan<char> resolveResult;
+                        try
+                        {
+
+                            var memberSlice = new StringSegment(str, memberStartIndex, endMatch - memberStartIndex);
+                            var memberPath = MemberPath.Parse(memberSlice);
+                            //resolveResult = GetMemberStringValue2(str.Substring(memberStartIndex, endMatch - memberStartIndex), throwIfNotFound) ?? fallbackValue?.ToString();
+                            // TODO: [hpintoribeiro] Handle fallbackValue
+                            resolveResult = GetMemberStringValue2(memberPath, throwIfNotFound);
+                        }
+                        catch (NotFoundException e)
+                        {
+                            throw new Error(
+                                "Error: {0} in '{1}'\n{2}",
+                                e.Message,
+                                str,
+                                e.Arguments
+                            );
+                        }
+
+                        if (resolveResult == ReadOnlySpan<char>.Empty)
+                        {
+                            // Resolve failed.
+                            builder.Append(str, startMatch, endMatch - startMatch + 1);
+                        }
+                        else
+                        {
+                            ++nbrReplacements;
+                            builder.Append(resolveResult);
+                        }
+                        currentSearchIndex = endMatch + 1;
+                    }
+                    else
+                    {
+                        builder.Append(str, startMatch, startMatchLength);
+                        currentSearchIndex = startMatch + startMatchLength;
+                    }
+                }
+
+                if (nbrReplacements == 0 && currentSearchIndex == 0)
+                    break;
+
+                builder.Append(str, currentSearchIndex, strLength - currentSearchIndex);
+                str = builder.ToString();
+                wasChanged = true;
+                builder.Clear();
+
+                if (nbrReplacements == 0)
+                    break;
+            }
+
+            if (!containsEscaped)
+                return str;
+
+            // Now that we have done all replace, convert all escaped char.
+            foreach (string beginStr in _pathBeginStrings)
+            {
+                if (beginStr.Length != 1)
+                    continue;
+                string escapedStr = beginStr + beginStr;
+                wasChanged = true;
+                str = str.Replace(escapedStr, beginStr);
+            }
+
+            foreach (char endChar in _pathEndCharacters)
+            {
+                string endStr = string.Empty + endChar;
+                string escapedStr = endStr + endStr;
+                wasChanged = true;
+                str = str.Replace(escapedStr, endStr);
+            }
+
+            return str;
+        }
         #region private
 
         private enum ResolveStatus
@@ -505,6 +680,7 @@ namespace Sharpmake
         private Dictionary<string, ResolveStatus> _resolveStatusFields = new Dictionary<string, ResolveStatus>();
         private List<string> _resolvingObjectPath = new List<string>();
         private Dictionary<string, RefCountedSymbol> _parameters = new Dictionary<string, RefCountedSymbol>();
+        private Dictionary<StringSegment, RefCountedSymbol> _parameters2;
         private readonly HashSet<object> _resolvedObject = new HashSet<object>();
 
         public char[] _pathEndCharacters = { ']' };
@@ -577,6 +753,19 @@ namespace Sharpmake
             propertyInfo = value.Item2;
         }
 
+        private static ConcurrentDictionary<(Type, string), (FieldInfo, PropertyInfo)> s_typeFieldPropertyCache2 = new();
+        private static void GetFieldInfoOrPropertyInfo2(Type type, string name, out FieldInfo fieldInfo, out PropertyInfo propertyInfo)
+        {
+            // Maybe get Property first will improve performance since it is more common.
+            (fieldInfo, propertyInfo) = s_typeFieldPropertyCache2.GetOrAdd((type, name), keyArg =>
+            {
+                var (memberType, memberName) = keyArg;
+                FieldInfo field = memberType.GetField(memberName);
+                PropertyInfo property = (field == null) ? memberType.GetProperty(memberName) : null;
+                return (field, property);
+            });
+        }
+
         [Serializable]
         private class NotFoundException : Exception
         {
@@ -629,6 +818,57 @@ namespace Sharpmake
                 throw new NotSupportedException($"{chunks.Length - 1} modifiers were found in '{rawInput}', only one is supported.");
             }
         }
+
+        private static ReadOnlySpan<char> ExtractNameAndModifier2(ReadOnlySpan<char> rawInput, out PropertyModifier modifier)
+        {
+            char modifierSymbol = s_modifierNameSplitter[0];
+            var modifierIndex = rawInput.IndexOf(modifierSymbol);
+            if (modifierIndex == -1)
+            {
+                modifier = PropertyModifier.None;
+                return rawInput;
+            }
+
+            var modifierSpan = rawInput[..modifierIndex];
+            var memberPathSpan = rawInput[(modifierIndex + 1)..];
+
+            if (memberPathSpan.IndexOf(modifierSymbol) != -1)
+            {
+                throw new NotSupportedException($"More than one modifier was found in '{rawInput}', only one is supported.");
+            }
+
+            modifier = Enum.Parse<PropertyModifier>(modifierSpan, true);
+            return (memberPathSpan.IsEmpty || memberPathSpan.IsWhiteSpace())
+                ? ReadOnlySpan<char>.Empty
+                : memberPathSpan;
+        }
+
+        private static StringSlice ExtractNameAndModifier3(in MemberPathSegment rawInput, out PropertyModifier modifier)
+        {
+            char modifierSymbol = s_modifierNameSplitter[0];
+            var modifierIndex = rawInput.SegmentValue.IndexOf(modifierSymbol);
+            if (modifierIndex == -1)
+            {
+                modifier = PropertyModifier.None;
+                return rawInput.SegmentValue;
+            }
+
+            StringSlice modifierSlice = rawInput.SegmentValue[..modifierIndex];
+            int startMemberPath = modifierIndex + 1;
+            int memberPathLength = rawInput.SegmentValue.Length - startMemberPath;
+            StringSlice memberPathSlice = rawInput.SegmentValue[startMemberPath..memberPathLength];
+
+            if (memberPathSlice.IndexOf(modifierSymbol) != -1)
+            {
+                throw new NotSupportedException($"More than one modifier was found in '{rawInput}', only one is supported.");
+            }
+
+            modifier = Enum.Parse<PropertyModifier>(modifierSlice.AsSpan(), true);
+            return memberPathSlice.Length == 0
+                ? StringSlice.Empty
+                : memberPathSlice;
+        }
+
 
         private static string ApplyModifier(PropertyModifier modifier, string input)
         {
@@ -742,6 +982,121 @@ namespace Sharpmake
             if (parameter == null)
             {
                 throw new NotFoundException(parameterName + name + " is null on target type " + refCountedReference.Value.GetType().Name + ", please set a proper value for sharpmake to resolve it");
+            }
+
+            // Handle platform names in case they are provided by a platform extension, this allows "[target.Platform]" to be properly resolved
+            if (parameter is Platform platformParameter)
+            {
+                parameter = Util.GetSimplePlatformString(platformParameter);
+            }
+
+            return ApplyModifier(modifier, parameter.ToString());
+        }
+
+        private ReadOnlySpan<char> GetMemberStringValue2(in MemberPath memberPath, bool throwIfNotFound)
+        {
+            //string[] names = memberPath.Split(s_memberPathSplitter);
+            //var memberPathSpan = memberPath.AsSpan();
+
+            if (memberPath == MemberPath.Empty)
+            {
+                if (throwIfNotFound)
+                    throw new NotFoundException("Cannot find unnamed parameter");
+
+                return ReadOnlySpan<char>.Empty;
+            }
+
+            MemberPathSegment memberPathSegment = memberPath.FirstSegment;
+
+            PropertyModifier modifier;
+            StringSlice parameterNameSlice = ExtractNameAndModifier3(memberPathSegment, out modifier);
+
+            // get the parameters...
+            // if (!IsCaseSensitive)
+            //     parameterNameSpan = parameterNameSpan.ToLowerInvariant();
+
+            // TODO: [hpintoribeiro] Maybe use a customEqualityComparer on dictionary to allow comparison of keys using ReadOnlySpan<char>.
+
+
+            RefCountedSymbol refCountedReference;
+            if (!_parameters2.TryGetValue(parameterNameSlice, out refCountedReference))
+            {
+                if (throwIfNotFound)
+                    throw new NotFoundException($"Cannot resolve parameter '{parameterNameSlice}'.", _parameters.Keys);
+
+                return null;
+            }
+
+            object parameter = refCountedReference.Value;
+            string name = "";
+            //for (int i = 1; i < names.Length && parameter != null; ++i)
+            while (memberPathSegment.TryGetNextSegment(out var member))
+            {
+                memberPathSegment = member;
+
+                bool found = false;
+
+                Type parameterType = parameter.GetType();
+                var memberName = member.SegmentValue.ToString();
+                GetFieldInfoOrPropertyInfo2(parameterType, memberName, out FieldInfo fieldInfo, out PropertyInfo propertyInfo);
+
+                if (fieldInfo != null)
+                {
+                    parameter = fieldInfo.GetValue(parameter);
+                    found = true;
+                }
+                else if (propertyInfo != null)
+                {
+                    parameter = propertyInfo.GetValue(parameter, null);
+                    found = true;
+                }
+
+                // IDictionary support
+                if (!found && !member.HasNextSegment && parameter is IDictionary)
+                {
+                    var dictionary = parameter as IDictionary;
+                    if (dictionary.Contains(memberName))
+                    {
+                        parameter = dictionary[memberName];
+                        found = true;
+                    }
+                }
+
+                if (!found)
+                {
+                    if (throwIfNotFound)
+                    {
+                        string currentPath = parameterNameSlice + name + _pathSeparator;
+
+                        // get all public fields
+                        var possibleArguments = parameterType.GetFields().Select(f => currentPath + f.Name);
+
+                        // all public properties
+                        possibleArguments = possibleArguments.Concat(parameterType.GetProperties().Select(p => currentPath + p.Name));
+
+                        // and dictionary keys, if they are strings
+                        var dictionary = parameter as IDictionary;
+                        if (dictionary != null)
+                        {
+                            var keysAsStrings = ((IDictionary)parameter).Keys as IEnumerable<string>;
+                            if (keysAsStrings != null)
+                                possibleArguments = possibleArguments.Concat(keysAsStrings.Select(k => currentPath + k));
+                        }
+
+                        throw new NotFoundException(
+                            $"Cannot find path '{memberName}' in parameter path '{memberPath}'",
+                            possibleArguments
+                        );
+                    }
+                    return null;
+                }
+
+                //name += _pathSeparator + nameChunk;
+            }
+
+            if (parameter == null)
+            {
+                throw new NotFoundException(parameterNameSlice + name + " is null on target type " + refCountedReference.Value.GetType().Name + ", please set a proper value for sharpmake to resolve it");
             }
 
             // Handle platform names in case they are provided by a platform extension, this allows "[target.Platform]" to be properly resolved

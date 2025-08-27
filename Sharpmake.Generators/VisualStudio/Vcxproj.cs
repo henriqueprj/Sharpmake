@@ -771,9 +771,6 @@ namespace Sharpmake.Generators.VisualStudio
             var platformIncludePaths = platformVcxproj.GetPlatformIncludePaths(context);
             context.Options["AdditionalPlatformIncludeDirectories"] = platformIncludePaths.Any() ? Util.PathGetRelative(context.ProjectDirectory, platformIncludePaths).JoinStrings(";") : FileGeneratorUtilities.RemoveLineTag;
 
-            var nmakeIncludeSearchPath = includePaths.Concat(platformIncludePaths);
-            context.Options["NMakeIncludeSearchPath"] = nmakeIncludeSearchPath.Any() ? Util.PathGetRelative(context.ProjectDirectory, nmakeIncludeSearchPath).JoinStrings(";") : FileGeneratorUtilities.RemoveLineTag;
-
             // Fill resource include dirs
             var resourceIncludePaths = platformVcxproj.GetResourceIncludePaths(context);
             context.Options["AdditionalResourceIncludeDirectories"] = resourceIncludePaths.Any() ? Util.PathGetRelative(context.ProjectDirectory, resourceIncludePaths).JoinStrings(";") : FileGeneratorUtilities.RemoveLineTag;
@@ -960,27 +957,20 @@ namespace Sharpmake.Generators.VisualStudio
 
             if (!fastbuildOnly)
             {
-                foreach( var conf in context.ProjectConfigurations)
+                string externalReferencesCopyLocal = (firstConf.Project.DependenciesCopyLocal.HasFlag(Project.DependenciesCopyLocalTypes.ExternalReferences)
+                                           ? "true"
+                                           : FileGeneratorUtilities.RemoveLineTag);
+
+                foreach (var reference in firstConf.ReferencesByPath)
                 {
-                    string externalReferencesCopyLocal = conf.Project.DependenciesCopyLocal.HasFlag(Project.DependenciesCopyLocalTypes.ExternalReferences)
-                        ? "true"
-                        : FileGeneratorUtilities.RemoveLineTag;
-                    
-                    using (projectFilesWriter.Declare("platformName", Util.GetToolchainPlatformString(conf.Platform, conf.Project, conf.Target)))
-                    using (projectFilesWriter.Declare("conf", conf))
+                    string nameWithExtension = reference.Split(Util.WindowsSeparator).Last();
+                    string name = nameWithExtension.Substring(0, nameWithExtension.LastIndexOf('.'));
+
+                    using (projectFilesWriter.Declare("include", name))
+                    using (projectFilesWriter.Declare("hintPath", reference))
+                    using (projectFilesWriter.Declare("private", externalReferencesCopyLocal))
                     {
-                        foreach (var reference in conf.ReferencesByPath)
-                        {
-                            string nameWithExtension = reference.Split(Util.WindowsSeparator).Last();
-                            string name = nameWithExtension.Substring(0, nameWithExtension.LastIndexOf('.'));
-                        
-                            using (projectFilesWriter.Declare("include", name))
-                            using (projectFilesWriter.Declare("hintPath", reference))
-                            using (projectFilesWriter.Declare("private", externalReferencesCopyLocal))
-                            {
-                                projectFilesWriter.Write(Template.Project.ReferenceByPath);
-                            }
-                        }
+                        projectFilesWriter.Write(Template.Project.ReferenceByPath);
                     }
                 }
             }

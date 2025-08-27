@@ -425,7 +425,7 @@ namespace Sharpmake.Generators.VisualStudio
 ";
 
                 public static string ReferenceByPath =
-@"    <Reference Include=""[include]"" Condition=""'$(Configuration)|$(Platform)'=='[conf.Name]|[platformName]'"">
+@"    <Reference Include=""[include]"">
       <HintPath>[hintPath]</HintPath>
       <Private>[private]</Private>
     </Reference>

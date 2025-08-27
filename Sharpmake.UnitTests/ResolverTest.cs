@@ -301,6 +301,19 @@ namespace Sharpmake.UnitTests
 
             Assert.AreEqual("<Field>&lt;stuff&gt;</Field>", result);
         }
+
+        [Test]
+        public void Foo()
+        {
+            var foo = new { N = "World" };
+
+            var resolver = new Resolver();
+            // resolver._pathBeginStrings = new[] { "$(" };
+            // resolver._pathEndCharacters = new[] { ')'};
+            resolver.SetParameter("p", foo);
+            string result = resolver.Resolve2("Hello [p.N] !", string.Empty, out var wasChanged);
+
+            Assert.AreEqual("Henrique", result);
+        }
     }
 }
-
