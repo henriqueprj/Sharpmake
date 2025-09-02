@@ -162,7 +162,7 @@ namespace Sharpmake
             }
         }
 
-        static private ConcurrentDictionary<Type, TypeWrapper> s_typeWrappers = new ConcurrentDictionary<Type, TypeWrapper>();
+        private static readonly ConcurrentDictionary<Type, TypeWrapper> s_typeWrappers = new ConcurrentDictionary<Type, TypeWrapper>();
 
         private TypeWrapper GetTypeWrapper(Type type)
         {
@@ -213,11 +213,8 @@ namespace Sharpmake
 
         private string SetParameterImpl(string name, object obj, bool scoped)
         {
-            if (!IsCaseSensitive)
-                name = name.ToLowerInvariant();
-
-            RefCountedSymbol refCountedObject;
-            if (_parameters.TryGetValue(name.AsMemory(), out refCountedObject))
+            ReadOnlyMemory<char> nameMem = name.AsMemory();
+            if (_parameters.TryGetValue(nameMem, out RefCountedSymbol refCountedObject))
             {
                 if (scoped)
                     refCountedObject.PushValue(obj);
@@ -226,7 +223,7 @@ namespace Sharpmake
             }
             else
             {
-                _parameters.Add(name.AsMemory(), new RefCountedSymbol(obj));
+                _parameters.Add(nameMem, new RefCountedSymbol(obj));
             }
 
             return name;
@@ -234,13 +231,11 @@ namespace Sharpmake
 
         public void RemoveParameter(string name)
         {
-            if (!IsCaseSensitive)
-                name = name.ToLowerInvariant();
-
-            RefCountedSymbol refCountedReference = _parameters[name.AsMemory()];
+            ReadOnlyMemory<char> nameMem = name.AsMemory();
+            RefCountedSymbol refCountedReference = _parameters[nameMem];
             refCountedReference.PopValue();
             if (!refCountedReference.HasValue)
-                _parameters.Remove(name.AsMemory());
+                _parameters.Remove(nameMem);
         }
 
         public class ScopedParameter : IDisposable
@@ -391,10 +386,11 @@ namespace Sharpmake
                     {
                         bool throwIfNotFound = fallbackValue == null;
 
-                        string resolveResult;
+                        ReadOnlySpan<char> resolveResult;
                         try
                         {
-                            resolveResult = GetMemberStringValue(str.Substring(memberStartIndex, endMatch - memberStartIndex), throwIfNotFound) ?? fallbackValue?.ToString();
+                            ReadOnlyMemory<char> memberPathMem = str.AsMemory(memberStartIndex, endMatch - memberStartIndex);
+                            resolveResult = GetMemberStringValue(memberPathMem, throwIfNotFound, fallbackValue);
                         }
                         catch (NotFoundException e)
                         {
@@ -406,7 +402,7 @@ namespace Sharpmake
                             );
                         }
 
-                        if (resolveResult == null)
+                        if (resolveResult.IsEmpty)
                         {
                             // Resolve failed.
                             builder.Append(str, startMatch, endMatch - startMatch + 1);
@@ -469,7 +465,9 @@ namespace Sharpmake
             Resolved
         };
 
-        private class RefCountedSymbol
+        // TODO: [hpintoribeiro] Changed from private to public to allow use it outside current class.
+        // Refactor it?
+        public class RefCountedSymbol
         {
             private readonly Stack<object> _scopedReferences = new Stack<object>();
 
@@ -505,7 +503,7 @@ namespace Sharpmake
 
         private Dictionary<string, ResolveStatus> _resolveStatusFields = new Dictionary<string, ResolveStatus>();
         private List<string> _resolvingObjectPath = new List<string>();
-        private Dictionary<ReadOnlyMemory<char>, RefCountedSymbol> _parameters = new Dictionary<ReadOnlyMemory<char>, RefCountedSymbol>(ReadOnlyMemoryCharComparer.Default);
+        private Dictionary<ReadOnlyMemory<char>, RefCountedSymbol> _parameters;
         private readonly HashSet<object> _resolvedObject = new HashSet<object>();
 
         public char[] _pathEndCharacters = { ']' };
@@ -612,28 +610,28 @@ namespace Sharpmake
 
         private static readonly char[] s_modifierNameSplitter = new[] { ':' };
         
-        private static ReadOnlySpan<char> ExtractNameAndModifier(in MemberPathSegmentEnumerator rawInput, out PropertyModifier modifier)
+        private static ReadOnlyMemory<char> ExtractNameAndModifier(in ReadOnlyMemory<char> rawInput, out PropertyModifier modifier)
         {
             char modifierSymbol = s_modifierNameSplitter[0];
-            var modifierIndex = rawInput.IndexOf(modifierSymbol);
+            var modifierIndex = rawInput.Span.IndexOf(modifierSymbol);
             if (modifierIndex == -1)
             {
                 modifier = PropertyModifier.None;
                 return rawInput;
             }
 
-            var modifierSpan = rawInput[..modifierIndex];
-            var memberPathSpan = rawInput[(modifierIndex + 1)..];
+            var modifierSpan = rawInput.Span[..modifierIndex];
+            var memberPathMem = rawInput[(modifierIndex + 1)..];
 
-            if (memberPathSpan.IndexOf(modifierSymbol) != -1)
+            if (memberPathMem.Span.IndexOf(modifierSymbol) != -1)
             {
                 throw new NotSupportedException($"More than one modifier was found in '{rawInput}', only one is supported.");
             }
 
             modifier = Enum.Parse<PropertyModifier>(modifierSpan, true);
-            return (memberPathSpan.IsEmpty || memberPathSpan.IsWhiteSpace())
-                ? ReadOnlySpan<char>.Empty
-                : memberPathSpan;
+            return memberPathMem.IsEmpty || memberPathMem.Span.IsWhiteSpace()
+                ? ReadOnlyMemory<char>.Empty
+                : memberPathMem;
         }
 
         private static string ApplyModifier(PropertyModifier modifier, string input)
@@ -652,12 +650,13 @@ namespace Sharpmake
         }
 
         private static readonly char[] s_memberPathSplitter = new[] { _pathSeparator };
-        private string GetMemberStringValue(ReadOnlyMemory<char> memberPath, bool throwIfNotFound)
+
+        // TODO: [hpintoribeiro] Add support fort fallbackValue
+        private ReadOnlySpan<char> GetMemberStringValue(ReadOnlyMemory<char> memberPath, bool throwIfNotFound, object fallbackValue = null)
         {
             // string[] names = memberPath.Split(s_memberPathSplitter);
-            var memberPathIterator = new MemberPathSegmentEnumerator(memberPath.Span);
-
-            if (memberPathIterator.IsEmpty)
+            var memberPathIterator = new MemberPathSegmentIterator(memberPath);
+            if (!memberPathIterator.MoveNext())
             {
                 if (throwIfNotFound)
                     throw new NotFoundException("Cannot find unnamed parameter");
@@ -665,20 +664,21 @@ namespace Sharpmake
             }
 
             PropertyModifier modifier = PropertyModifier.None;
-            var parameterName = ExtractNameAndModifier(memberPathIterator.Current, out modifier);
+            ReadOnlyMemory<char> parameterName = ExtractNameAndModifier(memberPathIterator.Current, out modifier);
 
             // get the parameters...
-            if (!IsCaseSensitive)
-                parameterName = parameterName.ToLowerInvariant();
             RefCountedSymbol refCountedReference;
             if (!_parameters.TryGetValue(parameterName, out refCountedReference))
             {
-                if (throwIfNotFound)
-                    throw new NotFoundException($"Cannot resolve parameter '{parameterName}'.", _parameters.Keys);
-
-                return null;
+                return throwIfNotFound
+                    ? throw new NotFoundException($"Cannot resolve parameter '{parameterName}'.", _parameters.Keys.Select(k => k.Span.ToString()))
+                    : null;
             }
             object parameter = refCountedReference.Value;
+
+            // ExpressionEvaluator.Evaluate(memberPath, _parameters);
+
+            // TODO: [hpintoribeiro] Continue here...
 
             string name = "";
             for (int i = 1; i < names.Length && parameter != null; ++i)

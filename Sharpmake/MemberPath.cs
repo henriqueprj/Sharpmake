@@ -318,14 +318,12 @@ internal readonly struct MemberPathSegment : IEquatable<MemberPathSegment>
 }
 
 [DebuggerDisplay("Value: {SegmentValue}")]
-internal ref struct MemberPathSegmentIterator : IEquatable<MemberPathSegment>
+internal ref struct MemberPathSegmentIterator
 {
     private const char Separator = '.';
 
-    public static readonly MemberPathSegment Empty = new(ReadOnlyMemory<char>.Empty);
-
     private readonly ReadOnlyMemory<char> _fullPath;
-    private int _segmentStartPosition;
+    private int _segmentStartPosition = -1;
 
     public MemberPathSegmentIterator(in ReadOnlyMemory<char> fullPath, int segmentStartPosition = 0)
     {
@@ -339,6 +337,12 @@ internal ref struct MemberPathSegmentIterator : IEquatable<MemberPathSegment>
 
     public bool MoveNext()
     {
+        if (_segmentStartPosition == -1)
+        {
+            _segmentStartPosition = 0;
+            return true;
+        }
+
         var currentOffsetSpan = _fullPath.Span[_segmentStartPosition..];
         var nextSegmentIndex = currentOffsetSpan.IndexOf(Separator);
         if (nextSegmentIndex == -1)
@@ -350,29 +354,20 @@ internal ref struct MemberPathSegmentIterator : IEquatable<MemberPathSegment>
         return true;
     }
 
-    public bool HasNextSegment => _fullPath.Span[_segmentStartPosition..].IndexOf(Separator) >= 0;
+    public bool HasNext => _fullPath.Span[_segmentStartPosition..].IndexOf(Separator) >= 0;
 
-    public ReadOnlyMemory<char> FullPath => _fullPath;
-
-    // public StringSlice Value
     public ReadOnlyMemory<char> Current
     {
         get
         {
-            var memberPathMem = _fullPath;
-            var memberPathOffsetSpan = memberPathMem.Span[_segmentStartPosition..]; 
-            var nextSegmentIndex = memberPathOffsetSpan.IndexOf(Separator);
+            ReadOnlyMemory<char> memberPathMem = _fullPath;
+            ReadOnlySpan<char> memberPathOffsetSpan = memberPathMem.Span[_segmentStartPosition..];
+            int nextSegmentIndex = memberPathOffsetSpan.IndexOf(Separator);
             return nextSegmentIndex == -1
                 ? memberPathMem[_segmentStartPosition..]
                 : memberPathMem.Slice(_segmentStartPosition, nextSegmentIndex);
         }
     }
-
-    public bool Equals(MemberPathSegmentIterator other) => Current.Span.SequenceEqual(other.Current.Span);
-    public override bool Equals(object obj) => obj is MemberPathSegment other && Equals(other);
-    public override int GetHashCode() => Current.GetHashCode();
-    public static bool operator ==(MemberPathSegmentIterator left, MemberPathSegmentIterator right) => left.Equals(right);
-    public static bool operator !=(MemberPathSegmentIterator left, MemberPathSegmentIterator right) => !left.Equals(right);
 }
 
 [DebuggerDisplay("Current: {Current}")]
