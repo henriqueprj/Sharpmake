@@ -6,7 +6,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Reflection;
-using Microsoft.Extensions.Primitives;
 
 namespace Sharpmake;
 
@@ -158,13 +157,18 @@ public static class ExpressionEvaluator
 {
     // Cache accessor: (rootType, "Name.Age" etc) -> compiled accessor delegate
     // object (root) => object? (final value)
-    private static readonly ConcurrentDictionary<(Type, ReadOnlyMemory<char>), Func<object, object?>> AccessorCache = new();
+    private static readonly ConcurrentDictionary<(Type, ReadOnlyMemory<char>), Func<object, object?>> AccessorCache = new(TypeAndReadOnlyMemoryCharComparer.Default);
 
+    public static void Add(Type type, ReadOnlyMemory<char> parameter, Func<object, object?> accessor)
+    {
+        AccessorCache.TryAdd((type, parameter), accessor);
+    }
+    
     /// <summary>
     /// Evaluate an expression token (e.g., "person.Name") against a variables dictionary.
     /// Returns null if anything is missing (variable not found, null intermediate, or member not found).
     /// </summary>
-    public static object? Evaluate(ReadOnlyMemory<char> expression /*ReadOnlySpan<char> expression*/, IReadOnlyDictionary<ReadOnlyMemory<char>, object> variables)
+    public static object? Evaluate(in ReadOnlyMemory<char> expression /*ReadOnlySpan<char> expression*/, IReadOnlyDictionary<ReadOnlyMemory<char>, object> variables)
     {
         if (expression.IsEmpty) return null;
 
@@ -191,83 +195,130 @@ public static class ExpressionEvaluator
     }
 
     // Build a compiled accessor for a given Type and dotted path ("A.B.C")
+    // private static Func<object, object?> BuildAccessor(Type rootType, ReadOnlyMemory<char> dottedPath)
+    // {
+    //     // Parse segments without creating an array of substrings more than necessary.
+    //     // We still need strings for reflection lookups, so we create one per segment.
+    //     //var memberPathSegment = new MemberPathSegment(dottedPath);
+    //     var memberPathSegment = new MemberPathSegmentEnumerator(dottedPath.Span);
+    //
+    //     // Build: (object obj) => (object?) { var r=(RootType)obj; if (r==null) return null; var tmp = r.A; if(tmp==null) return null; tmp = tmp.B; ... ; return (object?)tmp; }
+    //     var objParam = Expression.Parameter(typeof(object), "obj");
+    //     var typedRoot = Expression.Variable(rootType, "root");
+    //     var assignRoot = Expression.Assign(typedRoot, Expression.Convert(objParam, rootType));
+    //
+    //     var blockVars = new List<ParameterExpression> { typedRoot };
+    //     Expression body = typedRoot;
+    //
+    //     // If root is null, return null
+    //     Expression resultExpr;
+    //
+    //     if (memberPathSegment.IsEmpty)
+    //     {
+    //         resultExpr = Expression.Convert(typedRoot, typeof(object));
+    //     }
+    //     else
+    //     {
+    //         // Walk each segment, adding null-propagation
+    //         Expression current = typedRoot;
+    //
+    //         do
+    //         {
+    //             // current = current?.Member
+    //             // First, if current is a value type, no null check needed (unless nullable)
+    //             var currentType = current.Type;
+    //
+    //             // Resolve member: property or field (public instance)
+    //             MemberInfo? member = ResolveMember(currentType, memberPathSegment.Current.ToString());
+    //             if (member == null)
+    //             {
+    //                 // Member not found: compile accessor that always returns null
+    //                 return static _ => null;
+    //             }
+    //
+    //             Expression access = member is PropertyInfo pi
+    //                 ? Expression.Property(current, pi)
+    //                 : Expression.Field(current, (FieldInfo)member);
+    //
+    //             // Add null check if current is reference type or Nullable<T>
+    //             if (!currentType.IsValueType || Nullable.GetUnderlyingType(currentType) != null)
+    //             {
+    //                 var tmp = Expression.Variable(access.Type, "t");
+    //                 blockVars.Add(tmp);
+    //
+    //                 // tmp = current == null ? default : current.Member
+    //                 var assignTmp = Expression.Assign(
+    //                     tmp,
+    //                     Expression.Condition(
+    //                         Expression.Equal(current, Expression.Constant(null, current.Type)),
+    //                         Expression.Default(access.Type),
+    //                         access));
+    //
+    //                 // Next iteration reads from tmp (may be null/default)
+    //                 current = tmp;
+    //                 body = Expression.Block(new[] { tmp }, assignTmp, tmp);
+    //             }
+    //             else
+    //             {
+    //                 // Value type: just access
+    //                 current = access;
+    //             }
+    //         } while (memberPathSegment.MoveNext());
+    //
+    //         // Box final
+    //         resultExpr = Expression.Convert(current, typeof(object));
+    //         // Prepend typedRoot assignment
+    //         body = Expression.Block(blockVars, assignRoot, body, resultExpr);
+    //     }
+    //
+    //     var lambda = Expression.Lambda<Func<object, object?>>(body, objParam);
+    //     return lambda.Compile(); // JIT-compiled delegate; cached for reuse
+    // }
+    
+    // Build a compiled accessor for a given Type and dotted path ("A.B.C")
     private static Func<object, object?> BuildAccessor(Type rootType, ReadOnlyMemory<char> dottedPath)
     {
-        // Parse segments without creating an array of substrings more than necessary.
-        // We still need strings for reflection lookups, so we create one per segment.
-        var memberPathSegment = new MemberPathSegment(dottedPath);
+        var segments = new MemberPathSegmentEnumerator(dottedPath.Span);
 
-        // Build: (object obj) => (object?) { var r=(RootType)obj; if (r==null) return null; var tmp = r.A; if(tmp==null) return null; tmp = tmp.B; ... ; return (object?)tmp; }
         var objParam = Expression.Parameter(typeof(object), "obj");
         var typedRoot = Expression.Variable(rootType, "root");
+
         var assignRoot = Expression.Assign(typedRoot, Expression.Convert(objParam, rootType));
 
-        var blockVars = new List<ParameterExpression> { typedRoot };
-        Expression body = typedRoot;
+        Expression current = typedRoot;
 
-        // If root is null, return null
-        Expression resultExpr;
-
-        if (memberPathSegment == MemberPathSegment.Empty)
+        //foreach (string seg in segments)
+        do
         {
-            resultExpr = Expression.Convert(typedRoot, typeof(object));
-        }
-        else
-        {
-            // Walk each segment, adding null-propagation
-            Expression current = typedRoot;
+            MemberInfo? member = ResolveMember(current.Type, segments.Current.ToString());
+            if (member == null)
+                return static _ => null;
 
-            do
+            Expression access = member is PropertyInfo pi
+                ? Expression.Property(current, pi)
+                : Expression.Field(current, (FieldInfo)member);
+
+            // Add null-check if reference type
+            if (!current.Type.IsValueType || Nullable.GetUnderlyingType(current.Type) != null)
             {
-                // current = current?.Member
-                // First, if current is a value type, no null check needed (unless nullable)
-                var currentType = current.Type;
+                var tmp = Expression.Variable(access.Type, "t");
+                var assignTmp = Expression.Assign(
+                    tmp,
+                    Expression.Condition(
+                        Expression.Equal(current, Expression.Constant(null, current.Type)),
+                        Expression.Default(access.Type),
+                        access));
+                //current = tmp;
+                current = Expression.Block(new[] { tmp }, assignTmp, tmp);
+            }
+            else
+            {
+                current = access;
+            }
+        } while (segments.MoveNext());
 
-                // Resolve member: property or field (public instance)
-                MemberInfo? member = ResolveMember(currentType, memberPathSegment.SegmentValue.Span.ToString());
-                if (member == null)
-                {
-                    // Member not found: compile accessor that always returns null
-                    return static _ => null;
-                }
-
-                Expression access = member is PropertyInfo pi
-                    ? Expression.Property(current, pi)
-                    : Expression.Field(current, (FieldInfo)member);
-
-                // Add null check if current is reference type or Nullable<T>
-                if (!currentType.IsValueType || Nullable.GetUnderlyingType(currentType) != null)
-                {
-                    var tmp = Expression.Variable(access.Type, "t");
-                    blockVars.Add(tmp);
-
-                    // tmp = current == null ? default : current.Member
-                    var assignTmp = Expression.Assign(
-                        tmp,
-                        Expression.Condition(
-                            Expression.Equal(current, Expression.Constant(null, current.Type)),
-                            Expression.Default(access.Type),
-                            access));
-
-                    // Next iteration reads from tmp (may be null/default)
-                    current = tmp;
-                    body = Expression.Block(new[] { tmp }, assignTmp, tmp);
-                }
-                else
-                {
-                    // Value type: just access
-                    current = access;
-                }
-            } while (memberPathSegment.TryGetNextSegment(out memberPathSegment));
-
-            // Box final
-            resultExpr = Expression.Convert(current, typeof(object));
-            // Prepend typedRoot assignment
-            body = Expression.Block(blockVars, assignRoot, body, resultExpr);
-        }
-
-        var lambda = Expression.Lambda<Func<object, object?>>(body, objParam);
-        return lambda.Compile(); // JIT-compiled delegate; cached for reuse
+        var body = Expression.Block(new[] { typedRoot }, assignRoot, Expression.Convert(current, typeof(object)));
+        return Expression.Lambda<Func<object, object?>>(body, objParam).Compile();
     }
 
     private static MemberInfo? ResolveMember(Type type, string name)

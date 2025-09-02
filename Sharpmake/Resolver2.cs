@@ -6,22 +6,63 @@ using System.Collections.Generic;
 
 namespace Sharpmake;
 
-internal sealed class StringSliceComparer : IEqualityComparer<StringSlice>
+public class IgnoreCaseCharComparer : IEqualityComparer<char>
 {
-    private readonly StringComparison _comparison;
-
-    public static readonly StringSliceComparer Ordinal = new(StringComparison.Ordinal);
-    public static readonly StringSliceComparer OrdinalIgnoreCase = new(StringComparison.OrdinalIgnoreCase);
-
-    public StringSliceComparer(StringComparison comparison)
+    public static readonly IgnoreCaseCharComparer Default = new();
+    
+    public bool Equals(char x, char y)
     {
-        _comparison = comparison;
+        return char.ToLowerInvariant(x) == char.ToLowerInvariant(y);
     }
 
-    public bool Equals(StringSlice x, StringSlice y)
+    public int GetHashCode(char obj)
     {
-        return x.AsSpan().Equals(y.AsSpan(), _comparison);
+        return char.ToLowerInvariant(obj).GetHashCode();
+    }
+}
+
+public class ReadOnlyMemoryCharComparer : IEqualityComparer<ReadOnlyMemory<char>>
+{
+    public static readonly ReadOnlyMemoryCharComparer Default = new();
+
+    public ReadOnlyMemoryCharComparer()
+    {
+        
+    }
+    
+    public bool Equals(ReadOnlyMemory<char> x, ReadOnlyMemory<char> y) => x.Span.SequenceEqual(y.Span);
+    public int GetHashCode(ReadOnlyMemory<char> obj) => string.GetHashCode(obj.Span);
+}
+
+public class IgnoreCaseReadOnlyMemoryCharComparer : IEqualityComparer<ReadOnlyMemory<char>>
+{
+    public static readonly IgnoreCaseReadOnlyMemoryCharComparer Default = new();
+    
+    public bool Equals(ReadOnlyMemory<char> x, ReadOnlyMemory<char> y)
+    {
+        return x.Span.SequenceEqual(y.Span, IgnoreCaseCharComparer.Default);
     }
 
-    public int GetHashCode(StringSlice obj) => string.GetHashCode(obj.AsSpan());
+    public int GetHashCode(ReadOnlyMemory<char> obj)
+    {
+        Span<char> lowerSpan = stackalloc char[obj.Length];
+        _ = obj.Span.ToLowerInvariant(lowerSpan);
+        return string.GetHashCode(lowerSpan);
+    }
+}
+
+
+public class TypeAndReadOnlyMemoryCharComparer : IEqualityComparer<(Type, ReadOnlyMemory<char>)>
+{
+    public static readonly TypeAndReadOnlyMemoryCharComparer Default = new();
+    
+    public bool Equals((Type, ReadOnlyMemory<char>) x, (Type, ReadOnlyMemory<char>) y)
+    {
+        return x.Item1 == y.Item1 && x.Item2.Span.SequenceEqual(y.Item2.Span);
+    }
+
+    public int GetHashCode((Type, ReadOnlyMemory<char>) obj)
+    {
+        return HashCode.Combine(obj.Item1, string.GetHashCode(obj.Item2.Span));
+    }
 }

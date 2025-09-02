@@ -2,9 +2,9 @@
 // Licensed under the Apache 2.0 License. See LICENSE.md in the project root for license information.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using Microsoft.Extensions.Primitives;
 
 namespace Sharpmake;
 
@@ -145,47 +145,47 @@ namespace Sharpmake;
 //     }
 // }
 
-// [DebuggerDisplay("{Value}")]
-// internal readonly struct MemberPath : IEquatable<MemberPath>
-// {
-//     public const char Separator = '.';
-//     // public static readonly MemberPath Empty = new(StringSlice.Empty);
-//     public static readonly MemberPath Empty = new(StringSegment.Empty);
-//
-//     // private readonly StringSlice _path;
-//     private readonly ReadOnlyMemory<char> _path;
-//
-//     //private MemberPath(in StringSlice path)
-//     private MemberPath(in ReadOnlyMemory<char> path)
-//     {
-//         _path = path;
-//     }
-//
-//     // public static MemberPath Parse(in StringSlice s)
-//     public static MemberPath Parse(in ReadOnlyMemory<char> s)
-//     {
-//         // TODO: [hpintoribeiro] Validate MemberPath
-//
-//         return new MemberPath(s);
-//     }
-//
-//     public MemberPathSegment FirstSegment => new MemberPathSegment(this);
-//
-//     // public StringSlice Value => _path;
-//     public ReadOnlyMemory<char> Value => _path;
-//
-//     public override int GetHashCode() => _path.GetHashCode();
-//
-//     public override string ToString() => _path.ToString();
-//
-//     public bool Equals(MemberPath other) => _path.Equals(other._path);
-//
-//     public override bool Equals(object obj) => obj is MemberPath other && Equals(other);
-//
-//     public static bool operator ==(MemberPath left, MemberPath right) => left.Equals(right);
-//
-//     public static bool operator !=(MemberPath left, MemberPath right) => !left.Equals(right);
-// }
+[DebuggerDisplay("{Value}")]
+internal readonly struct MemberPath : IEquatable<MemberPath>
+{
+    public const char Separator = '.';
+    // public static readonly MemberPath Empty = new(StringSlice.Empty);
+    public static readonly MemberPath Empty = new(ReadOnlyMemory<char>.Empty);
+
+    // private readonly StringSlice _path;
+    private readonly ReadOnlyMemory<char> _path;
+
+    //private MemberPath(in StringSlice path)
+    private MemberPath(in ReadOnlyMemory<char> path)
+    {
+        _path = path;
+    }
+
+    // public static MemberPath Parse(in StringSlice s)
+    public static MemberPath Parse(in ReadOnlyMemory<char> s)
+    {
+        // TODO: [hpintoribeiro] Validate MemberPath
+
+        return new MemberPath(s);
+    }
+
+    public MemberPathSegment FirstSegment => new MemberPathSegment(_path);
+
+    // public StringSlice Value => _path;
+    public ReadOnlyMemory<char> Value => _path;
+
+    public override int GetHashCode() => _path.GetHashCode();
+
+    public override string ToString() => _path.ToString();
+
+    public bool Equals(MemberPath other) => _path.Equals(other._path);
+
+    public override bool Equals(object obj) => obj is MemberPath other && Equals(other);
+
+    public static bool operator ==(MemberPath left, MemberPath right) => left.Equals(right);
+
+    public static bool operator !=(MemberPath left, MemberPath right) => !left.Equals(right);
+}
 //
 // [DebuggerDisplay("Value: {Value}")]
 // internal readonly struct MemberPathSegment : IEquatable<MemberPathSegment>
@@ -272,17 +272,23 @@ internal readonly struct MemberPathSegment : IEquatable<MemberPathSegment>
         _fullPath = fullPath;
         _segmentStartPosition = segmentStartPosition;
     }
+    
+    public MemberPathSegment(string fullPath, int segmentStartPosition = 0) : this(fullPath.AsMemory(), segmentStartPosition)
+    {
+    }
 
     public bool TryGetNextSegment(out MemberPathSegment nextSegment)
     {
-        var nextSegmentIndex = _fullPath.Span[(_segmentStartPosition + 1)..].IndexOf(Separator);
+        var currentOffsetSpan = _fullPath.Span[_segmentStartPosition..];
+        var nextSegmentIndex = currentOffsetSpan.IndexOf(Separator);
         if (nextSegmentIndex == -1)
         {
             nextSegment = Empty;
             return false;
         }
 
-        nextSegment = new MemberPathSegment(_fullPath, nextSegmentIndex + 1);
+        int startIndexNextSegment = _segmentStartPosition + nextSegmentIndex + 1;
+        nextSegment = new MemberPathSegment(_fullPath, startIndexNextSegment);
         return true;
     }
 
@@ -296,35 +302,113 @@ internal readonly struct MemberPathSegment : IEquatable<MemberPathSegment>
         get
         {
             var memberPathMem = _fullPath;
-            var nextSegmentIndex = memberPathMem.Span[_segmentStartPosition..].IndexOf(Separator);
+            var memberPathOffsetSpan = memberPathMem.Span[_segmentStartPosition..]; 
+            var nextSegmentIndex = memberPathOffsetSpan.IndexOf(Separator);
             return nextSegmentIndex == -1
                 ? memberPathMem[_segmentStartPosition..]
                 : memberPathMem.Slice(_segmentStartPosition, nextSegmentIndex);
         }
     }
 
-    public bool Equals(MemberPathSegment other)
+    public bool Equals(MemberPathSegment other) => SegmentValue.Span.SequenceEqual(other.SegmentValue.Span);
+    public override bool Equals(object obj) => obj is MemberPathSegment other && Equals(other);
+    public override int GetHashCode() => SegmentValue.GetHashCode();
+    public static bool operator ==(MemberPathSegment left, MemberPathSegment right) => left.Equals(right);
+    public static bool operator !=(MemberPathSegment left, MemberPathSegment right) => !left.Equals(right);
+}
+
+[DebuggerDisplay("Value: {SegmentValue}")]
+internal ref struct MemberPathSegmentIterator : IEquatable<MemberPathSegment>
+{
+    private const char Separator = '.';
+
+    public static readonly MemberPathSegment Empty = new(ReadOnlyMemory<char>.Empty);
+
+    private readonly ReadOnlyMemory<char> _fullPath;
+    private int _segmentStartPosition;
+
+    public MemberPathSegmentIterator(in ReadOnlyMemory<char> fullPath, int segmentStartPosition = 0)
     {
-        return SegmentValue.Span.SequenceEqual(other.SegmentValue.Span);
+        _fullPath = fullPath;
+        _segmentStartPosition = segmentStartPosition;
+    }
+    
+    public MemberPathSegmentIterator(string fullPath, int segmentStartPosition = 0) : this(fullPath.AsMemory(), segmentStartPosition)
+    {
     }
 
-    public override bool Equals(object obj)
+    public bool MoveNext()
     {
-        return obj is MemberPathSegment other && Equals(other);
+        var currentOffsetSpan = _fullPath.Span[_segmentStartPosition..];
+        var nextSegmentIndex = currentOffsetSpan.IndexOf(Separator);
+        if (nextSegmentIndex == -1)
+        {
+            return false;
+        }
+
+        _segmentStartPosition = _segmentStartPosition + nextSegmentIndex + 1;
+        return true;
     }
 
-    public override int GetHashCode()
+    public bool HasNextSegment => _fullPath.Span[_segmentStartPosition..].IndexOf(Separator) >= 0;
+
+    public ReadOnlyMemory<char> FullPath => _fullPath;
+
+    // public StringSlice Value
+    public ReadOnlyMemory<char> Current
     {
-        return SegmentValue.GetHashCode();
+        get
+        {
+            var memberPathMem = _fullPath;
+            var memberPathOffsetSpan = memberPathMem.Span[_segmentStartPosition..]; 
+            var nextSegmentIndex = memberPathOffsetSpan.IndexOf(Separator);
+            return nextSegmentIndex == -1
+                ? memberPathMem[_segmentStartPosition..]
+                : memberPathMem.Slice(_segmentStartPosition, nextSegmentIndex);
+        }
     }
 
-    public static bool operator ==(MemberPathSegment left, MemberPathSegment right)
+    public bool Equals(MemberPathSegmentIterator other) => Current.Span.SequenceEqual(other.Current.Span);
+    public override bool Equals(object obj) => obj is MemberPathSegment other && Equals(other);
+    public override int GetHashCode() => Current.GetHashCode();
+    public static bool operator ==(MemberPathSegmentIterator left, MemberPathSegmentIterator right) => left.Equals(right);
+    public static bool operator !=(MemberPathSegmentIterator left, MemberPathSegmentIterator right) => !left.Equals(right);
+}
+
+[DebuggerDisplay("Current: {Current}")]
+internal ref struct MemberPathSegmentEnumerator
+{
+    private const char Separator = '.';
+
+    private readonly ReadOnlyMemory<char> _fullPath;
+    private ReadOnlySpan<char> _path;
+
+    public MemberPathSegmentEnumerator(in ReadOnlyMemory<char> fullPath)
     {
-        return left.Equals(right);
+        _fullPath = fullPath;
+        _path = fullPath.Span;
     }
 
-    public static bool operator !=(MemberPathSegment left, MemberPathSegment right)
+    public bool MoveNext()
     {
-        return !left.Equals(right);
+        var nextSegmentIndex = _path.IndexOf(Separator);
+        if (nextSegmentIndex == -1)
+        {
+            return false;
+        }
+
+        _path = _path[(nextSegmentIndex + 1)..];
+        return true;
+    }
+    
+    public bool IsEmpty => _path.IsEmpty;
+    
+    public ReadOnlySpan<char> Current
+    {
+        get
+        {
+            var nextSegmentIndex = _path.IndexOf(Separator);
+            return nextSegmentIndex == -1 ? _path : _path[..nextSegmentIndex];
+        }
     }
 }
