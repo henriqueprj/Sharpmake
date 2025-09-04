@@ -576,8 +576,9 @@ namespace Sharpmake
             propertyInfo = value.Item2;
         }
 
+        // TODO: [hpintoribeiro] changed access modifier to internal to use NotFoundException in ExpressionEvaluator.
         [Serializable]
-        private class NotFoundException : Exception
+        internal class NotFoundException : Exception
         {
             private IEnumerable<string> _arguments;
             public string Arguments
@@ -663,7 +664,7 @@ namespace Sharpmake
                 return null;
             }
 
-            PropertyModifier modifier = PropertyModifier.None;
+            PropertyModifier modifier;
             ReadOnlyMemory<char> parameterName = ExtractNameAndModifier(memberPathIterator.Current, out modifier);
 
             // get the parameters...
@@ -676,7 +677,7 @@ namespace Sharpmake
             }
             object parameter = refCountedReference.Value;
 
-            // ExpressionEvaluator.Evaluate(memberPath, _parameters);
+            ExpressionEvaluator.Evaluate(memberPath, _parameters, throwIfNotFound);
 
             // TODO: [hpintoribeiro] Continue here...
 

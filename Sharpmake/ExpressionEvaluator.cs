@@ -4,8 +4,11 @@
 #nullable enable
 
 using System;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 
@@ -26,7 +29,7 @@ public static class ExpressionEvaluator
     /// Evaluate an expression token (e.g., "person.Name") against a variables dictionary.
     /// Returns null if anything is missing (variable not found, null intermediate, or member not found).
     /// </summary>
-    public static object? Evaluate(in ReadOnlyMemory<char> expression, IReadOnlyDictionary<ReadOnlyMemory<char>, Resolver3.RefCountedSymbol> variables)
+    public static object? Evaluate(in ReadOnlyMemory<char> expression, IReadOnlyDictionary<ReadOnlyMemory<char>, Resolver3.RefCountedSymbol> variables, bool throwIfNotFound)
     {
         if (expression.IsEmpty) return null;
 
@@ -48,15 +51,15 @@ public static class ExpressionEvaluator
         //string pathKey = new string(pathMem); // allocation once per distinct path
         var key = (root.GetType(), pathMem);
 
-        var accessor = AccessorCache.GetOrAdd(key, k => BuildAccessor(k.Item1, k.Item2));
+        var accessor = AccessorCache.GetOrAdd(key, static (k, shouldThrowIfNotFound) => BuildAccessor(k.Item1, k.Item2, shouldThrowIfNotFound), throwIfNotFound);
         return accessor(root.Value);
     }
 
-    // TODO: [hpintoribeiro] Add support for IDictionary.
+    // TODO: [hpintoribeiro] Test support for IDictionary.
     // Build a compiled accessor for a given Type and dotted path ("A.B.C")
-    private static Func<object, object?> BuildAccessor(Type rootType, ReadOnlyMemory<char> dottedPath)
+    private static Func<object, object?> BuildAccessor(Type rootType, ReadOnlyMemory<char> memberPath, bool throwIfNotFound)
     {
-        var segments = new MemberPathSegmentIterator(dottedPath);
+        var segments = new MemberPathSegmentIterator(memberPath);
 
         var objParam = Expression.Parameter(typeof(object), "obj");
         var typedRoot = Expression.Variable(rootType, "root");
@@ -67,15 +70,37 @@ public static class ExpressionEvaluator
 
         while (segments.MoveNext())
         {
-            MemberInfo? member = ResolveMember(current.Type, segments.Current.Span.ToString());
+            // Reflection api only accept string...
+            var currentSegmentString = segments.Current.Span.ToString();
+            MemberInfo? member = ResolveMember(current.Type, currentSegmentString);
 
-            // TODO: [hpintoribeiro] Add support for IDictionary. If is last segment and rootType is IDictionary, add code to retrieve the value from it.
-            if (member == null)
+            if (member is null)
+            {
+                if (!segments.HasNext && typeof(IDictionary).IsAssignableFrom(current.Type))
+                {
+                    // Generate code to lookup value from IDictionary
+                    var dictVar = Expression.Variable(typeof(IDictionary), "dict");
+                    var keyConst = Expression.Constant(currentSegmentString, typeof(object));
+                    var assignDict = Expression.Assign(dictVar, Expression.Convert(current, typeof(IDictionary)));
+                    var indexerProp = typeof(IDictionary).GetProperty("Item")!;
+                    var indexerAccess = Expression.Property(dictVar, indexerProp, keyConst);
+
+                    current = Expression.Block(new[] { dictVar }, assignDict, indexerAccess);
+                    continue;
+                }
+
+                if (throwIfNotFound)
+                    throw GetNotFoundException(current.Type, segments); // TODO: [hpintoribeiro] Continue here...
+
                 return static _ => null;
+            }
 
-            Expression access = member is PropertyInfo pi
-                ? Expression.Property(current, pi)
-                : Expression.Field(current, (FieldInfo)member);
+            Expression access = member switch
+            {
+                PropertyInfo pi => Expression.Property(current, pi),
+                FieldInfo fi => Expression.Field(current, fi),
+                _ => throw new NotSupportedException() // TODO: [hpintoribeiro] Improve error message
+            };
 
             // Add null-check if reference type
             if (!current.Type.IsValueType || Nullable.GetUnderlyingType(current.Type) != null)
@@ -99,6 +124,33 @@ public static class ExpressionEvaluator
         var body = Expression.Block(new[] { typedRoot }, assignRoot, Expression.Convert(current, typeof(object)));
         return Expression.Lambda<Func<object, object?>>(body, objParam).Compile();
     }
+
+    [DoesNotReturn]
+    private static Resolver3.NotFoundException GetNotFoundException(Type currentType, in MemberPathSegmentIterator memberPathIterator)
+    {
+        string currentPath = memberPathIterator.AbsolutePreviousPath.Span.ToString() + MemberPathSegmentIterator.Separator;
+
+        // get all public fields
+        var possibleArguments = currentType.GetFields().Select(f => currentPath + f.Name);
+
+        // all public properties
+        possibleArguments = possibleArguments.Concat(currentType.GetProperties().Select(p => currentPath + p.Name));
+
+        // and dictionary keys, if they are strings
+        var dictionary = parameter as IDictionary; // TODO: [hpintoribeiro] Continue here...
+        if (dictionary != null)
+        {
+            var keysAsStrings = ((IDictionary)parameter).Keys as IEnumerable<string>;
+            if (keysAsStrings != null)
+                possibleArguments = possibleArguments.Concat(keysAsStrings.Select(k => currentPath + k));
+        }
+
+        return new Resolver3.NotFoundException(
+            $"Cannot find path '{nameChunk}' in parameter path '{memberPath}'",
+            possibleArguments
+        );
+    }
+
 
     private static MemberInfo? ResolveMember(Type type, string name)
     {

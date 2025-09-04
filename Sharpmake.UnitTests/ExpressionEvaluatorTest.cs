@@ -14,15 +14,15 @@ public class ExpressionEvaluatorTest
     {
         var foo = new Foo { BarProp = new Bar { Value = "baz" } };
         
-        var parameters = new Dictionary<ReadOnlyMemory<char>, object>(ReadOnlyMemoryCharComparer.Default)
+        var parameters = new Dictionary<ReadOnlyMemory<char>, Resolver3.RefCountedSymbol>(ReadOnlyMemoryCharComparer.Default)
         {
-            { "foo".AsMemory(), foo }
+            { "foo".AsMemory(), new Resolver3.RefCountedSymbol(foo) }
         };
 
         var expr = "foo.BarProp.Value".AsMemory();
         
-        ExpressionEvaluator.Add(typeof(Foo), "BarProp.Value".AsMemory(), obj => ((Foo)obj).BarProp.Value);
-        object result = ExpressionEvaluator.Evaluate(expr, parameters);
+        ExpressionEvaluator.Add(typeof(Foo), "BarProp.Value".AsMemory(), static obj => ((Foo)obj).BarProp.Value);
+        object result = ExpressionEvaluator.Evaluate(expr, parameters, false);
 
         Assert.AreEqual(foo.BarProp.Value, result);
     }

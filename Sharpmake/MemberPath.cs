@@ -320,9 +320,10 @@ internal readonly struct MemberPathSegment : IEquatable<MemberPathSegment>
 [DebuggerDisplay("Value: {SegmentValue}")]
 internal ref struct MemberPathSegmentIterator
 {
-    private const char Separator = '.';
+    public const char Separator = '.';
 
     private readonly ReadOnlyMemory<char> _fullPath;
+    private ReadOnlyMemory<char> _current = ReadOnlyMemory<char>.Empty;
     private int _segmentStartPosition = -1;
 
     public MemberPathSegmentIterator(in ReadOnlyMemory<char> fullPath, int segmentStartPosition = 0)
@@ -330,44 +331,64 @@ internal ref struct MemberPathSegmentIterator
         _fullPath = fullPath;
         _segmentStartPosition = segmentStartPosition;
     }
-    
-    public MemberPathSegmentIterator(string fullPath, int segmentStartPosition = 0) : this(fullPath.AsMemory(), segmentStartPosition)
-    {
-    }
 
     public bool MoveNext()
     {
         if (_segmentStartPosition == -1)
         {
+            if (_fullPath.Length == 0)
+                return false;
+
             _segmentStartPosition = 0;
             return true;
         }
 
-        var currentOffsetSpan = _fullPath.Span[_segmentStartPosition..];
-        var nextSegmentIndex = currentOffsetSpan.IndexOf(Separator);
+        var nextSegmentIndex = _fullPath.Span[_segmentStartPosition..].IndexOf(Separator);
         if (nextSegmentIndex == -1)
-        {
             return false;
-        }
 
         _segmentStartPosition = _segmentStartPosition + nextSegmentIndex + 1;
+        _current = nextSegmentIndex == -1
+            ? _fullPath[_segmentStartPosition..]
+            : _fullPath.Slice(_segmentStartPosition, nextSegmentIndex);
+
         return true;
+    }
+
+    public ReadOnlyMemory<char> AbsoluteSegmentPath
+    {
+        get
+        {
+            int absoluteSegmentPosition = _segmentStartPosition + _current.Length + 1;
+            return _fullPath[..absoluteSegmentPosition];
+        }
+    }
+
+    public ReadOnlyMemory<char> AbsolutePreviousPath
+    {
+        get
+        {
+            return _segmentStartPosition <= 0
+                ? ReadOnlyMemory<char>.Empty
+                : _fullPath[..(_segmentStartPosition - 1)];
+        }
     }
 
     public bool HasNext => _fullPath.Span[_segmentStartPosition..].IndexOf(Separator) >= 0;
 
-    public ReadOnlyMemory<char> Current
-    {
-        get
-        {
-            ReadOnlyMemory<char> memberPathMem = _fullPath;
-            ReadOnlySpan<char> memberPathOffsetSpan = memberPathMem.Span[_segmentStartPosition..];
-            int nextSegmentIndex = memberPathOffsetSpan.IndexOf(Separator);
-            return nextSegmentIndex == -1
-                ? memberPathMem[_segmentStartPosition..]
-                : memberPathMem.Slice(_segmentStartPosition, nextSegmentIndex);
-        }
-    }
+    public ReadOnlyMemory<char> Current => _current;
+    // public ReadOnlyMemory<char> Current
+    // {
+    //     get
+    //     {
+    //         ReadOnlyMemory<char> memberPathMem = _fullPath;
+    //         ReadOnlySpan<char> memberPathOffsetSpan = memberPathMem.Span[_segmentStartPosition..];
+    //         int nextSegmentIndex = memberPathOffsetSpan.IndexOf(Separator);
+    //         return nextSegmentIndex == -1
+    //             ? memberPathMem[_segmentStartPosition..]
+    //             : memberPathMem.Slice(_segmentStartPosition, nextSegmentIndex);
+    //     }
+    // }
 }
 
 [DebuggerDisplay("Current: {Current}")]

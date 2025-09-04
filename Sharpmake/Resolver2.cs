@@ -10,26 +10,14 @@ public class IgnoreCaseCharComparer : IEqualityComparer<char>
 {
     public static readonly IgnoreCaseCharComparer Default = new();
     
-    public bool Equals(char x, char y)
-    {
-        return char.ToLowerInvariant(x) == char.ToLowerInvariant(y);
-    }
-
-    public int GetHashCode(char obj)
-    {
-        return char.ToLowerInvariant(obj).GetHashCode();
-    }
+    public bool Equals(char x, char y) => char.ToLowerInvariant(x) == char.ToLowerInvariant(y);
+    public int GetHashCode(char obj) => char.ToLowerInvariant(obj).GetHashCode();
 }
 
 public class ReadOnlyMemoryCharComparer : IEqualityComparer<ReadOnlyMemory<char>>
 {
     public static readonly ReadOnlyMemoryCharComparer Default = new();
 
-    public ReadOnlyMemoryCharComparer()
-    {
-        
-    }
-    
     public bool Equals(ReadOnlyMemory<char> x, ReadOnlyMemory<char> y) => x.Span.SequenceEqual(y.Span);
     public int GetHashCode(ReadOnlyMemory<char> obj) => string.GetHashCode(obj.Span);
 }
